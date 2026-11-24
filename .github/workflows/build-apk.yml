@@ -1,0 +1,109 @@
+name: Build Project Drift APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Accept Android SDK Licenses
+        run: |
+          SDK_DIR="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK_DIR" >> $GITHUB_ENV
+          mkdir -p "$SDK_DIR/licenses"
+          yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK_DIR" --licenses > /dev/null 2>&1 || true
+
+      - name: Install dependencies and bundle offline Three.js
+        run: |
+          npm install
+          cp node_modules/three/build/three.module.js www/three.module.js
+          cp node_modules/three/build/three.core.js www/three.core.js || true
+          sed -i 's|https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js|./three.module.js|g' www/index.html
+          npx cap add android
+          npx cap sync android
+
+      - name: Apply custom Project Drift app icon
+        run: |
+          python3 -m pip install pillow
+          python3 - << 'PYEOF'
+          import os, shutil
+          from PIL import Image, ImageDraw
+
+          src = Image.open('www/icon.jpg').convert('RGBA')
+          res_dir = 'android/app/src/main/res'
+          anydpi = os.path.join(res_dir, 'mipmap-anydpi-v26')
+          if os.path.exists(anydpi):
+              shutil.rmtree(anydpi)
+
+          sizes = {
+              'mipmap-mdpi': 48,
+              'mipmap-hdpi': 72,
+              'mipmap-xhdpi': 96,
+              'mipmap-xxhdpi': 144,
+              'mipmap-xxxhdpi': 192,
+          }
+          for folder, sz in sizes.items():
+              out_dir = os.path.join(res_dir, folder)
+              os.makedirs(out_dir, exist_ok=True)
+              resized = src.resize((sz, sz), Image.LANCZOS)
+              mask_sq = Image.new('L', (sz, sz), 0)
+              ImageDraw.Draw(mask_sq).rounded_rectangle((0, 0, sz, sz), radius=int(sz * 0.22), fill=255)
+              sq_icon = Image.new('RGBA', (sz, sz), (0, 0, 0, 0))
+              sq_icon.paste(resized, (0, 0), mask_sq)
+              sq_icon.save(os.path.join(out_dir, 'ic_launcher.png'))
+
+              mask_rd = Image.new('L', (sz, sz), 0)
+              ImageDraw.Draw(mask_rd).ellipse((0, 0, sz, sz), fill=255)
+              rd_icon = Image.new('RGBA', (sz, sz), (0, 0, 0, 0))
+              rd_icon.paste(resized, (0, 0), mask_rd)
+              rd_icon.save(os.path.join(out_dir, 'ic_launcher_round.png'))
+          PYEOF
+
+      - name: Build Debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Prepare APK file
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk ProjectDrift3D-Android.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProjectDrift3D-Android-APK
+          path: ProjectDrift3D-Android.apk
+
+      - name: Publish Direct Download Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0-drift-apk
+          name: Project Drift 3D Android APK
+          body: Descarga directa de ProjectDrift3D-Android.apk (offline + Vertical/Horizontal).
+          files: ProjectDrift3D-Android.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
